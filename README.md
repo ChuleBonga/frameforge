@@ -1,40 +1,102 @@
-# frameforge
+# FrameForge
 
-FrameForge is a premium, mobile-first AI video generation prototype built with Next.js, React, and Tailwind CSS.
+FrameForge is a premium, mobile-first AI video generation prototype for creators. It turns guided wizard choices, such as subject, camera motion, cinematic style, aspect ratio, and duration, into a generated video result with a theater view, local download flow, saved history, and remix controls.
 
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+The app is designed around a secure backend proxy: the browser never receives the NVIDIA API key. The frontend sends generation choices to a Next.js route handler, and the server decides whether to use preview/mock mode or attempt NVIDIA-hosted generation.
 
-## Getting Started
+## Tech Stack
 
-First, run the development server:
+- Next.js 16 App Router
+- React 19
+- TypeScript
+- Tailwind CSS 4
+- Framer Motion
+- Lucide React
+- NVIDIA API Catalog integration through a server-side route
+
+## Run Locally
+
+Install dependencies:
+
+```bash
+npm install
+```
+
+Start the development server:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```text
+http://127.0.0.1:3000
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Environment Variables
 
-## Learn More
+Create a local env file from the example:
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+copy .env.example .env.local
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Required variables:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```text
+NVIDIA_API_KEY=replace-with-your-rotated-nvidia-key
+NVIDIA_IMAGE_ENDPOINT=https://ai.api.nvidia.com/v1/genai/stabilityai/stable-diffusion-xl
+NVIDIA_VIDEO_ENDPOINT=https://ai.api.nvidia.com/v1/genai/stabilityai/stable-video-diffusion
+MOCK_NVIDIA=true
+FALLBACK_TO_MOCK=true
+MOCK_DELAY_MS=1400
+```
 
-## Deploy on Vercel
+Use a real NVIDIA API key only in `.env.local`. Do not commit `.env.local`.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Preview Mode
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+FrameForge currently runs safely in preview/mock mode by default:
+
+```text
+MOCK_NVIDIA=true
+```
+
+In this mode, the Generate button returns a playable demo video result. This keeps the UI, theater, download, save, and remix flows functional without spending API credits or depending on NVIDIA video endpoint availability.
+
+## Real NVIDIA Mode
+
+To attempt real NVIDIA generation, update `.env.local`:
+
+```text
+MOCK_NVIDIA=false
+FALLBACK_TO_MOCK=true
+```
+
+With fallback enabled, the backend will try the configured NVIDIA image/video pipeline first. If the real provider fails, the app falls back to the preview result so the user flow still completes.
+
+Set this only when you have valid server-side NVIDIA credentials and endpoint access:
+
+```text
+NVIDIA_API_KEY=your-real-key
+```
+
+## Security
+
+`NVIDIA_API_KEY` must stay server-side. Do not put it in frontend code, do not prefix it with `NEXT_PUBLIC_`, do not log it, and do not return it from API responses.
+
+The project intentionally reads NVIDIA secrets only inside the backend route handler. `.gitignore` protects `.env.local` and other `.env` files from being committed.
+
+## Known Blocker
+
+The real NVIDIA Stable Video Diffusion endpoint currently returns an account-level `404 Not Found` for this API account. Until the account has access to a working NVIDIA-hosted video endpoint, use preview/mock mode for a fully functional local demo.
+
+## Verification
+
+Run these before pushing changes:
+
+```bash
+npm run lint
+npm run build
+```
