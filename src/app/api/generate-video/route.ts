@@ -10,10 +10,18 @@ import {
 export const runtime = "nodejs";
 
 type ProviderPayload = Record<string, unknown>;
+type VideoProvider = "mock" | "nvidia" | "ltx";
 type VideoAsset = {
   videoUrl: string;
   url?: string;
   base64?: string;
+  mimeType?: string;
+};
+
+type ImageAsset = {
+  dataUrl?: string;
+  base64?: string;
+  url?: string;
   mimeType?: string;
 };
 
@@ -27,7 +35,9 @@ const defaultFallbackImageEndpoint =
   "https://ai.api.nvidia.com/v1/genai/black-forest-labs/flux.1-schnell";
 const defaultVideoEndpoint =
   "https://ai.api.nvidia.com/v1/genai/stabilityai/stable-video-diffusion";
+const defaultLtxEndpoint = "https://api.ltx.video/v2/text-to-video";
 const validAspectRatios = new Set<WizardState["aspectRatio"]>(["9:16", "16:9", "1:1"]);
+const ltxDurations = [6, 8, 10, 12, 14, 16, 18, 20];
 
 function hasRecordKey<T extends Record<string, unknown>>(
   record: T,
@@ -55,14 +65,20 @@ function isWizardState(input: unknown): input is WizardState {
 
 function buildCreatorPrompt(state: WizardState) {
   const subject = state.subject.trim() || "A lone astronaut";
+  const cropInstruction =
+    state.aspectRatio === "1:1" ? "center-safe for a square social crop" : undefined;
 
   return [
     `A cinematic shot of ${subject}`,
     motionLabels[state.motion].toLowerCase(),
     `in the style of ${styleLabels[state.style]}`,
     `composed for ${state.aspectRatio} creator video`,
+    cropInstruction,
     "rich lighting, smooth motion, high detail",
-  ].join(", ");
+    "no text, no logos, no watermarks",
+  ]
+    .filter(Boolean)
+    .join(", ");
 }
 
 function buildImagePayload(prompt: string, endpoint: string): ProviderPayload {
@@ -85,7 +101,7 @@ function buildImagePayload(prompt: string, endpoint: string): ProviderPayload {
   };
 }
 
-function buildVideoPayload(image: string): ProviderPayload {
+function buildNvidiaVideoPayload(image: string): ProviderPayload {
   return {
     image,
     cfg_scale: 2.5,
@@ -122,16 +138,23 @@ function extractVideoAsset(payload: unknown): VideoAsset | undefined {
     };
   }
 
+  const output = record.output as Record<string, unknown> | undefined;
+  const result = record.result as Record<string, unknown> | undefined;
+  const video = record.video as Record<string, unknown> | undefined;
+
   const directCandidates = [
     record.video_url,
     record.videoUrl,
     record.url,
     record.output_url,
     record.outputUrl,
-    (record.video as Record<string, unknown> | undefined)?.url,
-    (record.output as Record<string, unknown> | undefined)?.video_url,
-    (record.output as Record<string, unknown> | undefined)?.videoUrl,
-    (record.output as Record<string, unknown> | undefined)?.url,
+    video?.url,
+    output?.video_url,
+    output?.videoUrl,
+    output?.url,
+    result?.video_url,
+    result?.videoUrl,
+    result?.url,
   ];
 
   for (const candidate of directCandidates) {
@@ -140,36 +163,39 @@ function extractVideoAsset(payload: unknown): VideoAsset | undefined {
     }
   }
 
-  const nestedOutputBase64 = getString(
-    (record.output as Record<string, unknown> | undefined) ?? {},
-    ["base64", "video_base64", "videoBase64"],
-  );
-  if (nestedOutputBase64) {
-    const output = record.output as Record<string, unknown>;
-    const mimeType = getString(output, ["mime_type", "mimeType", "content_type"]) ?? videoMimeType;
-    return {
-      videoUrl: nestedOutputBase64.startsWith("data:")
-        ? nestedOutputBase64
-        : `data:${mimeType};base64,${nestedOutputBase64}`,
-      base64: nestedOutputBase64,
-      mimeType,
-    };
+  for (const nestedRecord of [output, result]) {
+    const nestedOutputBase64 = getString(nestedRecord ?? {}, [
+      "base64",
+      "video_base64",
+      "videoBase64",
+    ]);
+    if (nestedOutputBase64) {
+      const mimeType =
+        getString(nestedRecord ?? {}, ["mime_type", "mimeType", "content_type"]) ?? videoMimeType;
+      return {
+        videoUrl: nestedOutputBase64.startsWith("data:")
+          ? nestedOutputBase64
+          : `data:${mimeType};base64,${nestedOutputBase64}`,
+        base64: nestedOutputBase64,
+        mimeType,
+      };
+    }
   }
 
-  const data = record.data;
-  if (Array.isArray(data)) {
-    for (const item of data) {
+  const scanArrays = [record.data, record.artifacts, record.outputs];
+  for (const value of scanArrays) {
+    if (!Array.isArray(value)) {
+      continue;
+    }
+
+    for (const item of value) {
       if (item && typeof item === "object") {
         const itemRecord = item as Record<string, unknown>;
-        if (typeof itemRecord.url === "string") {
-          return { videoUrl: itemRecord.url, url: itemRecord.url };
+        const itemUrl = getString(itemRecord, ["url", "video_url", "videoUrl"]);
+        if (itemUrl) {
+          return { videoUrl: itemUrl, url: itemUrl };
         }
-        if (typeof itemRecord.video_url === "string") {
-          return { videoUrl: itemRecord.video_url, url: itemRecord.video_url };
-        }
-        if (typeof itemRecord.videoUrl === "string") {
-          return { videoUrl: itemRecord.videoUrl, url: itemRecord.videoUrl };
-        }
+
         const itemBase64 = getString(itemRecord, ["base64", "video_base64", "videoBase64"]);
         if (itemBase64) {
           const mimeType =
@@ -186,45 +212,8 @@ function extractVideoAsset(payload: unknown): VideoAsset | undefined {
     }
   }
 
-  const artifacts = record.artifacts;
-  if (Array.isArray(artifacts)) {
-    for (const artifact of artifacts) {
-      if (artifact && typeof artifact === "object") {
-        const artifactRecord = artifact as Record<string, unknown>;
-        if (typeof artifactRecord.url === "string") {
-          return { videoUrl: artifactRecord.url, url: artifactRecord.url };
-        }
-        if (typeof artifactRecord.video_url === "string") {
-          return { videoUrl: artifactRecord.video_url, url: artifactRecord.video_url };
-        }
-        if (typeof artifactRecord.videoUrl === "string") {
-          return { videoUrl: artifactRecord.videoUrl, url: artifactRecord.videoUrl };
-        }
-        const artifactBase64 = getString(artifactRecord, ["base64", "video_base64", "videoBase64"]);
-        if (artifactBase64) {
-          const mimeType =
-            getString(artifactRecord, ["mime_type", "mimeType", "content_type"]) ?? videoMimeType;
-          return {
-            videoUrl: artifactBase64.startsWith("data:")
-              ? artifactBase64
-              : `data:${mimeType};base64,${artifactBase64}`,
-            base64: artifactBase64,
-            mimeType,
-          };
-        }
-      }
-    }
-  }
-
   return undefined;
 }
-
-type ImageAsset = {
-  dataUrl?: string;
-  base64?: string;
-  url?: string;
-  mimeType?: string;
-};
 
 function extractImageAsset(payload: unknown): ImageAsset | undefined {
   if (!payload || typeof payload !== "object") {
@@ -378,6 +367,37 @@ function summarizeProviderPayload(value: unknown, depth = 0): unknown {
   return undefined;
 }
 
+function errorDetails(value: unknown) {
+  return JSON.stringify(summarizeProviderPayload(value) ?? "No provider payload.");
+}
+
+function getProviderFromEnv(): VideoProvider {
+  const configuredProvider = process.env.VIDEO_PROVIDER?.toLowerCase();
+  if (configuredProvider === "mock" || configuredProvider === "nvidia" || configuredProvider === "ltx") {
+    return configuredProvider;
+  }
+
+  return process.env.MOCK_NVIDIA === "false" ? "nvidia" : "mock";
+}
+
+function getMockDelay() {
+  const configuredDelay = Number(process.env.MOCK_DELAY_MS ?? 1400);
+  return Number.isFinite(configuredDelay) ? Math.min(Math.max(configuredDelay, 0), 5000) : 1400;
+}
+
+function getFallbackGeneration(state: WizardState, prompt: string) {
+  return {
+    ...getMockGeneration(state),
+    prompt,
+  };
+}
+
+function getUniqueImageEndpoints(primaryEndpoint: string) {
+  return [primaryEndpoint, defaultFallbackImageEndpoint].filter(
+    (endpoint, index, endpoints) => endpoints.indexOf(endpoint) === index,
+  );
+}
+
 async function createNvcfAsset(apiKey: string, contentType: string, description: string) {
   const response = await fetch(nvcfAssetsEndpoint, {
     method: "POST",
@@ -393,8 +413,8 @@ async function createNvcfAsset(apiKey: string, contentType: string, description:
 
   if (!response.ok || !payload || typeof payload !== "object") {
     throw new Error(
-      `NVIDIA asset creation failed (${response.status}): ${JSON.stringify(
-        summarizeProviderPayload(payload) ?? response.statusText,
+      `NVIDIA asset creation failed (${response.status}): ${errorDetails(
+        payload ?? response.statusText,
       )}`,
     );
   }
@@ -457,12 +477,6 @@ async function prepareImageForVideo(imageDataUrl: string, apiKey: string) {
   };
 }
 
-function getUniqueImageEndpoints(primaryEndpoint: string) {
-  return [primaryEndpoint, defaultFallbackImageEndpoint].filter(
-    (endpoint, index, endpoints) => endpoints.indexOf(endpoint) === index,
-  );
-}
-
 async function requestImageGeneration(apiKey: string, prompt: string, endpoint: string) {
   const response = await fetch(endpoint, {
     method: "POST",
@@ -479,52 +493,16 @@ async function requestImageGeneration(apiKey: string, prompt: string, endpoint: 
   return { endpoint, response, payload };
 }
 
-function getMockDelay() {
-  const configuredDelay = Number(process.env.MOCK_DELAY_MS ?? 1400);
-  return Number.isFinite(configuredDelay) ? Math.min(Math.max(configuredDelay, 0), 5000) : 1400;
-}
-
-function getFallbackGeneration(state: WizardState, prompt: string) {
-  return {
-    ...getMockGeneration(state),
-    prompt,
-  };
-}
-
-export async function POST(request: Request) {
-  const body = await request.json().catch(() => null);
-
-  if (!isWizardState(body)) {
-    return NextResponse.json({ error: "Invalid wizard payload." }, { status: 400 });
-  }
-
+async function generateWithNvidia(state: WizardState, prompt: string): Promise<GenerationResult> {
   const imageEndpoint = process.env.NVIDIA_IMAGE_ENDPOINT ?? defaultImageEndpoint;
   const videoEndpoint = process.env.NVIDIA_VIDEO_ENDPOINT ?? defaultVideoEndpoint;
   const apiKey = process.env.NVIDIA_API_KEY;
-  const useMock = process.env.MOCK_NVIDIA !== "false";
-  const fallbackToMock = process.env.FALLBACK_TO_MOCK !== "false";
-
-  if (useMock) {
-    await new Promise((resolve) => setTimeout(resolve, getMockDelay()));
-    return NextResponse.json(getMockGeneration(body));
-  }
-
-  const prompt = buildCreatorPrompt(body);
 
   if (!apiKey) {
-    if (fallbackToMock) {
-      return NextResponse.json(getFallbackGeneration(body, prompt));
-    }
-
-    return NextResponse.json(
-      { error: "NVIDIA_API_KEY is not configured on the server." },
-      { status: 500 },
-    );
+    throw new Error("NVIDIA_API_KEY is not configured on the server.");
   }
 
-  let imageResult:
-    | Awaited<ReturnType<typeof requestImageGeneration>>
-    | undefined;
+  let imageResult: Awaited<ReturnType<typeof requestImageGeneration>> | undefined;
 
   for (const endpoint of getUniqueImageEndpoints(imageEndpoint)) {
     const candidate = await requestImageGeneration(apiKey, prompt, endpoint);
@@ -536,99 +514,34 @@ export async function POST(request: Request) {
   }
 
   if (!imageResult) {
-    if (fallbackToMock) {
-      return NextResponse.json(getFallbackGeneration(body, prompt));
-    }
-
-    return NextResponse.json(
-      { error: "NVIDIA image generation could not be started." },
-      { status: 502 },
-    );
+    throw new Error("NVIDIA image generation could not be started.");
   }
 
-  const imageResponse = imageResult.response;
-  const imagePayload = imageResult.payload;
+  const { response: imageResponse, payload: imagePayload } = imageResult;
 
   if (!imageResponse.ok) {
-    if (fallbackToMock) {
-      return NextResponse.json(getFallbackGeneration(body, prompt));
-    }
-
-    return NextResponse.json(
-      {
-        error: "NVIDIA image generation failed.",
-        status: imageResponse.status,
-        details:
-          imagePayload && typeof imagePayload === "object"
-            ? summarizeProviderPayload(imagePayload)
-            : imageResponse.statusText,
-      },
-      { status: imageResponse.status },
+    throw new Error(
+      `NVIDIA image generation failed (${imageResponse.status}): ${errorDetails(
+        imagePayload ?? imageResponse.statusText,
+      )}`,
     );
   }
 
   const imageAsset = extractImageAsset(imagePayload);
 
   if (!imageAsset) {
-    if (fallbackToMock) {
-      return NextResponse.json(getFallbackGeneration(body, prompt));
-    }
-
-    return NextResponse.json(
-      {
-        error: "NVIDIA image response did not include an image asset.",
-        details: summarizeProviderPayload(imagePayload),
-      },
-      { status: 502 },
+    throw new Error(
+      `NVIDIA image response did not include an image asset: ${errorDetails(imagePayload)}`,
     );
   }
 
-  let imageDataUrl: string | undefined;
-  try {
-    imageDataUrl = await resolveImageDataUrl(imageAsset);
-  } catch (error) {
-    if (fallbackToMock) {
-      return NextResponse.json(getFallbackGeneration(body, prompt));
-    }
-
-    return NextResponse.json(
-      {
-        error: "Generated image could not be prepared for video generation.",
-        details: error instanceof Error ? error.message : "Unknown image conversion error.",
-      },
-      { status: 502 },
-    );
-  }
+  const imageDataUrl = await resolveImageDataUrl(imageAsset);
 
   if (!imageDataUrl) {
-    if (fallbackToMock) {
-      return NextResponse.json(getFallbackGeneration(body, prompt));
-    }
-
-    return NextResponse.json(
-      { error: "Generated image could not be converted to a data URL." },
-      { status: 502 },
-    );
+    throw new Error("Generated image could not be converted to a data URL.");
   }
 
-  let videoInput: Awaited<ReturnType<typeof prepareImageForVideo>>;
-
-  try {
-    videoInput = await prepareImageForVideo(imageDataUrl, apiKey);
-  } catch (error) {
-    if (fallbackToMock) {
-      return NextResponse.json(getFallbackGeneration(body, prompt));
-    }
-
-    return NextResponse.json(
-      {
-        error: "Generated image could not be uploaded for video generation.",
-        details: error instanceof Error ? error.message : "Unknown NVIDIA asset upload error.",
-      },
-      { status: 502 },
-    );
-  }
-
+  const videoInput = await prepareImageForVideo(imageDataUrl, apiKey);
   const videoHeaders: Record<string, string> = {
     Authorization: `Bearer ${apiKey}`,
     Accept: "application/json",
@@ -639,53 +552,40 @@ export async function POST(request: Request) {
     videoHeaders["NVCF-INPUT-ASSET-REFERENCES"] = videoInput.assetId;
   }
 
-  const videoResponse = await fetch(videoEndpoint, {
-    method: "POST",
-    headers: videoHeaders,
-    body: JSON.stringify(buildVideoPayload(videoInput.image)),
-  });
+  let videoResponse: Response | undefined;
+  let videoPayload: unknown;
 
-  const videoPayload = await videoResponse.json().catch(() => null);
+  try {
+    videoResponse = await fetch(videoEndpoint, {
+      method: "POST",
+      headers: videoHeaders,
+      body: JSON.stringify(buildNvidiaVideoPayload(videoInput.image)),
+    });
 
-  if (videoInput.assetId) {
-    await deleteNvcfAsset(apiKey, videoInput.assetId);
+    videoPayload = await videoResponse.json().catch(() => null);
+  } finally {
+    if (videoInput.assetId) {
+      await deleteNvcfAsset(apiKey, videoInput.assetId);
+    }
   }
 
-  if (!videoResponse.ok) {
-    if (fallbackToMock) {
-      return NextResponse.json(getFallbackGeneration(body, prompt));
-    }
-
-    return NextResponse.json(
-      {
-        error: "NVIDIA video generation failed.",
-        status: videoResponse.status,
-        details:
-          videoPayload && typeof videoPayload === "object"
-            ? summarizeProviderPayload(videoPayload)
-            : videoResponse.statusText,
-      },
-      { status: videoResponse.status },
+  if (!videoResponse?.ok) {
+    throw new Error(
+      `NVIDIA video generation failed (${videoResponse?.status ?? "unknown"}): ${errorDetails(
+        videoPayload ?? videoResponse?.statusText,
+      )}`,
     );
   }
 
   const videoAsset = extractVideoAsset(videoPayload);
 
   if (!videoAsset) {
-    if (fallbackToMock) {
-      return NextResponse.json(getFallbackGeneration(body, prompt));
-    }
-
-    return NextResponse.json(
-      {
-        error: "NVIDIA video response did not include a video asset.",
-        details: summarizeProviderPayload(videoPayload),
-      },
-      { status: 502 },
+    throw new Error(
+      `NVIDIA video response did not include a video asset: ${errorDetails(videoPayload)}`,
     );
   }
 
-  const result: GenerationResult = {
+  return {
     id: crypto.randomUUID(),
     prompt,
     videoUrl: videoAsset.videoUrl,
@@ -695,6 +595,219 @@ export async function POST(request: Request) {
     createdAt: new Date().toISOString(),
     provider: "nvidia",
   };
+}
 
-  return NextResponse.json(result);
+function getLtxResolution(aspectRatio: WizardState["aspectRatio"]) {
+  if (aspectRatio === "9:16") {
+    return "1080x1920";
+  }
+
+  return "1920x1080";
+}
+
+function getLtxDuration(stateDuration: number) {
+  const configuredDuration = Number(process.env.LTX_DURATION_SECONDS ?? stateDuration);
+  const requestedDuration = Number.isFinite(configuredDuration) ? configuredDuration : 6;
+
+  return ltxDurations.find((duration) => duration >= requestedDuration) ?? 20;
+}
+
+function buildLtxPayload(state: WizardState, prompt: string): ProviderPayload {
+  return {
+    prompt,
+    model: process.env.LTX_MODEL ?? "ltx-2-3-fast",
+    duration: getLtxDuration(state.duration),
+    resolution: process.env.LTX_RESOLUTION ?? getLtxResolution(state.aspectRatio),
+  };
+}
+
+function getPollInterval() {
+  const configuredInterval = Number(process.env.LTX_POLL_INTERVAL_MS ?? 5000);
+  return Number.isFinite(configuredInterval)
+    ? Math.min(Math.max(configuredInterval, 1000), 10000)
+    : 5000;
+}
+
+function getMaxPollAttempts() {
+  const configuredAttempts = Number(process.env.LTX_MAX_POLL_ATTEMPTS ?? 18);
+  return Number.isFinite(configuredAttempts)
+    ? Math.min(Math.max(configuredAttempts, 1), 60)
+    : 18;
+}
+
+function wait(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function pollLtxJob(apiKey: string, endpoint: string, jobId: string) {
+  const pollInterval = getPollInterval();
+  const maxAttempts = getMaxPollAttempts();
+  const statusEndpoint = `${endpoint.replace(/\/$/, "")}/${jobId}`;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    if (attempt > 0) {
+      await wait(pollInterval);
+    }
+
+    const response = await fetch(statusEndpoint, {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        Accept: "application/json",
+      },
+    });
+
+    const payload = await response.json().catch(() => null);
+
+    if (!response.ok) {
+      throw new Error(
+        `LTX job polling failed (${response.status}): ${errorDetails(
+          payload ?? response.statusText,
+        )}`,
+      );
+    }
+
+    if (!payload || typeof payload !== "object") {
+      continue;
+    }
+
+    const record = payload as Record<string, unknown>;
+    const status = getString(record, ["status"]);
+
+    if (status === "completed") {
+      return payload;
+    }
+
+    if (status === "failed") {
+      throw new Error(`LTX job failed: ${errorDetails(record.error ?? payload)}`);
+    }
+  }
+
+  throw new Error("LTX generation timed out before the job completed.");
+}
+
+async function generateWithLtx(state: WizardState, prompt: string): Promise<GenerationResult> {
+  const apiKey = process.env.LTX_API_KEY;
+  const endpoint = process.env.LTX_ENDPOINT ?? defaultLtxEndpoint;
+
+  if (!apiKey) {
+    throw new Error("LTX_API_KEY is not configured on the server.");
+  }
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      Accept: "application/json, video/mp4",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(buildLtxPayload(state, prompt)),
+  });
+
+  const contentType = response.headers.get("content-type") ?? "";
+
+  if (response.ok && contentType.includes("video/")) {
+    const videoBytes = await response.arrayBuffer();
+    const base64 = Buffer.from(videoBytes).toString("base64");
+
+    return {
+      id: crypto.randomUUID(),
+      prompt,
+      videoUrl: `data:${contentType.split(";")[0]};base64,${base64}`,
+      base64,
+      mimeType: contentType.split(";")[0],
+      createdAt: new Date().toISOString(),
+      provider: "ltx",
+    };
+  }
+
+  const payload = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new Error(
+      `LTX generation failed (${response.status}): ${errorDetails(payload ?? response.statusText)}`,
+    );
+  }
+
+  const immediateVideo = extractVideoAsset(payload);
+  if (immediateVideo) {
+    return {
+      id: crypto.randomUUID(),
+      prompt,
+      videoUrl: immediateVideo.videoUrl,
+      url: immediateVideo.url,
+      base64: immediateVideo.base64,
+      mimeType: immediateVideo.mimeType,
+      createdAt: new Date().toISOString(),
+      provider: "ltx",
+    };
+  }
+
+  if (!payload || typeof payload !== "object") {
+    throw new Error("LTX generation response was empty.");
+  }
+
+  const jobId = getString(payload as Record<string, unknown>, ["id", "job_id", "jobId"]);
+
+  if (!jobId) {
+    throw new Error(`LTX generation did not return a job id: ${errorDetails(payload)}`);
+  }
+
+  const completedPayload = await pollLtxJob(apiKey, endpoint, jobId);
+  const videoAsset = extractVideoAsset(completedPayload);
+
+  if (!videoAsset) {
+    throw new Error(
+      `LTX completed job did not include a video asset: ${errorDetails(completedPayload)}`,
+    );
+  }
+
+  return {
+    id: crypto.randomUUID(),
+    prompt,
+    videoUrl: videoAsset.videoUrl,
+    url: videoAsset.url,
+    base64: videoAsset.base64,
+    mimeType: videoAsset.mimeType,
+    createdAt: new Date().toISOString(),
+    provider: "ltx",
+  };
+}
+
+export async function POST(request: Request) {
+  const body = await request.json().catch(() => null);
+
+  if (!isWizardState(body)) {
+    return NextResponse.json({ error: "Invalid wizard payload." }, { status: 400 });
+  }
+
+  const prompt = buildCreatorPrompt(body);
+  const provider = getProviderFromEnv();
+  const fallbackToMock = process.env.FALLBACK_TO_MOCK !== "false";
+
+  if (provider === "mock") {
+    await wait(getMockDelay());
+    return NextResponse.json(getFallbackGeneration(body, prompt));
+  }
+
+  try {
+    const result = provider === "ltx"
+      ? await generateWithLtx(body, prompt)
+      : await generateWithNvidia(body, prompt);
+
+    return NextResponse.json(result);
+  } catch (error) {
+    if (fallbackToMock) {
+      return NextResponse.json(getFallbackGeneration(body, prompt));
+    }
+
+    return NextResponse.json(
+      {
+        error:
+          error instanceof Error
+            ? error.message
+            : `${provider.toUpperCase()} video generation failed.`,
+      },
+      { status: 502 },
+    );
+  }
 }
