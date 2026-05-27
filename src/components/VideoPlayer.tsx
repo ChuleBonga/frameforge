@@ -13,6 +13,12 @@ type VideoPlayerProps = {
 
 const DEFAULT_VIDEO_MIME = "video/mp4";
 
+const providerLabels = {
+  mock: "Preview Mode",
+  nvidia: "NVIDIA Render",
+  ltx: "LTX Render",
+} satisfies Record<GenerationResult["provider"], string>;
+
 function isRawBase64(source: string) {
   const trimmed = source.trim();
 
@@ -201,7 +207,7 @@ export function VideoPlayer({ result, onRemix, onSave, saved }: VideoPlayerProps
             {result ? "Final render" : "Preview theater"}
           </p>
           <p className="truncate text-[10px] font-bold uppercase tracking-widest text-zinc-600">
-            {result?.provider === "mock" ? "Development mock" : "Ready for NVIDIA output"}
+            {result ? providerLabels[result.provider] : "Ready for provider output"}
           </p>
         </div>
 

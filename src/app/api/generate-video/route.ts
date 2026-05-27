@@ -3,6 +3,7 @@ import {
   getMockGeneration,
   motionLabels,
   styleLabels,
+  type GenerationProvider,
   type GenerationResult,
   type WizardState,
 } from "@/lib/video";
@@ -10,7 +11,7 @@ import {
 export const runtime = "nodejs";
 
 type ProviderPayload = Record<string, unknown>;
-type VideoProvider = "mock" | "nvidia" | "ltx";
+type VideoProvider = GenerationProvider;
 type VideoAsset = {
   videoUrl: string;
   url?: string;
@@ -35,7 +36,8 @@ const defaultFallbackImageEndpoint =
   "https://ai.api.nvidia.com/v1/genai/black-forest-labs/flux.1-schnell";
 const defaultVideoEndpoint =
   "https://ai.api.nvidia.com/v1/genai/stabilityai/stable-video-diffusion";
-const defaultLtxEndpoint = "https://api.ltx.video/v2/text-to-video";
+const defaultLtxSyncEndpoint = "https://api.ltx.video/v1/text-to-video";
+const defaultLtxAsyncEndpoint = "https://api.ltx.video/v2/text-to-video";
 const validAspectRatios = new Set<WizardState["aspectRatio"]>(["9:16", "16:9", "1:1"]);
 const ltxDurations = [6, 8, 10, 12, 14, 16, 18, 20];
 
@@ -373,7 +375,11 @@ function errorDetails(value: unknown) {
 
 function getProviderFromEnv(): VideoProvider {
   const configuredProvider = process.env.VIDEO_PROVIDER?.toLowerCase();
-  if (configuredProvider === "mock" || configuredProvider === "nvidia" || configuredProvider === "ltx") {
+  if (
+    configuredProvider === "mock" ||
+    configuredProvider === "nvidia" ||
+    configuredProvider === "ltx"
+  ) {
     return configuredProvider;
   }
 
@@ -605,6 +611,18 @@ function getLtxResolution(aspectRatio: WizardState["aspectRatio"]) {
   return "1920x1080";
 }
 
+function getLtxMode() {
+  return process.env.LTX_MODE === "sync" ? "sync" : "async";
+}
+
+function getLtxEndpoint(mode: "sync" | "async") {
+  if (mode === "sync") {
+    return defaultLtxSyncEndpoint;
+  }
+
+  return process.env.LTX_ENDPOINT ?? defaultLtxAsyncEndpoint;
+}
+
 function getLtxDuration(stateDuration: number) {
   const configuredDuration = Number(process.env.LTX_DURATION_SECONDS ?? stateDuration);
   const requestedDuration = Number.isFinite(configuredDuration) ? configuredDuration : 6;
@@ -617,7 +635,7 @@ function buildLtxPayload(state: WizardState, prompt: string): ProviderPayload {
     prompt,
     model: process.env.LTX_MODEL ?? "ltx-2-3-fast",
     duration: getLtxDuration(state.duration),
-    resolution: process.env.LTX_RESOLUTION ?? getLtxResolution(state.aspectRatio),
+    resolution: getLtxResolution(state.aspectRatio),
   };
 }
 
@@ -642,7 +660,7 @@ function wait(ms: number) {
 async function pollLtxJob(apiKey: string, endpoint: string, jobId: string) {
   const pollInterval = getPollInterval();
   const maxAttempts = getMaxPollAttempts();
-  const statusEndpoint = `${endpoint.replace(/\/$/, "")}/${jobId}`;
+  const statusEndpoint = `${endpoint.replace(/\/$/, "")}/${encodeURIComponent(jobId)}`;
 
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     if (attempt > 0) {
@@ -687,7 +705,8 @@ async function pollLtxJob(apiKey: string, endpoint: string, jobId: string) {
 
 async function generateWithLtx(state: WizardState, prompt: string): Promise<GenerationResult> {
   const apiKey = process.env.LTX_API_KEY;
-  const endpoint = process.env.LTX_ENDPOINT ?? defaultLtxEndpoint;
+  const mode = getLtxMode();
+  const endpoint = getLtxEndpoint(mode);
 
   if (!apiKey) {
     throw new Error("LTX_API_KEY is not configured on the server.");
@@ -724,7 +743,9 @@ async function generateWithLtx(state: WizardState, prompt: string): Promise<Gene
 
   if (!response.ok) {
     throw new Error(
-      `LTX generation failed (${response.status}): ${errorDetails(payload ?? response.statusText)}`,
+      `LTX ${mode} generation failed (${response.status}): ${errorDetails(
+        payload ?? response.statusText,
+      )}`,
     );
   }
 
@@ -743,13 +764,13 @@ async function generateWithLtx(state: WizardState, prompt: string): Promise<Gene
   }
 
   if (!payload || typeof payload !== "object") {
-    throw new Error("LTX generation response was empty.");
+    throw new Error(`LTX ${mode} generation response was empty.`);
   }
 
   const jobId = getString(payload as Record<string, unknown>, ["id", "job_id", "jobId"]);
 
   if (!jobId) {
-    throw new Error(`LTX generation did not return a job id: ${errorDetails(payload)}`);
+    throw new Error(`LTX ${mode} generation did not return a job id: ${errorDetails(payload)}`);
   }
 
   const completedPayload = await pollLtxJob(apiKey, endpoint, jobId);

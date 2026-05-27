@@ -10,6 +10,8 @@ export type WizardState = {
   duration: number;
 };
 
+export type GenerationProvider = "nvidia" | "ltx" | "mock";
+
 export type GenerationResult = {
   id: string;
   prompt: string;
@@ -19,7 +21,7 @@ export type GenerationResult = {
   mimeType?: string;
   posterUrl?: string;
   createdAt: string;
-  provider: "nvidia" | "mock";
+  provider: GenerationProvider;
 };
 
 export const motionLabels: Record<CameraMotion, string> = {
