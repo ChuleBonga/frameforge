@@ -207,7 +207,7 @@ export function VideoPlayer({ result, onRemix, onSave, saved }: VideoPlayerProps
             {result ? "Final render" : "Preview theater"}
           </p>
           <p className="truncate text-[10px] font-bold uppercase tracking-widest text-zinc-600">
-            {result ? providerLabels[result.provider] : "Ready for provider output"}
+            {result ? providerLabels[result.provider] : "Ready for generation"}
           </p>
         </div>
 
