@@ -10,7 +10,7 @@ export type WizardState = {
   duration: number;
 };
 
-export type GenerationProvider = "nvidia" | "ltx" | "mock";
+export type GenerationProvider = "mock" | "nvidia" | "local-comfy";
 
 export type GenerationResult = {
   id: string;

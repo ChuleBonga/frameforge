@@ -16,7 +16,7 @@ const DEFAULT_VIDEO_MIME = "video/mp4";
 const providerLabels = {
   mock: "Preview Mode",
   nvidia: "NVIDIA Render",
-  ltx: "LTX Render",
+  "local-comfy": "Local ComfyUI",
 } satisfies Record<GenerationResult["provider"], string>;
 
 function isRawBase64(source: string) {

@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import { readFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 import {
   getMockGeneration,
   motionLabels,
@@ -36,10 +38,9 @@ const defaultFallbackImageEndpoint =
   "https://ai.api.nvidia.com/v1/genai/black-forest-labs/flux.1-schnell";
 const defaultVideoEndpoint =
   "https://ai.api.nvidia.com/v1/genai/stabilityai/stable-video-diffusion";
-const defaultLtxSyncEndpoint = "https://api.ltx.video/v1/text-to-video";
-const defaultLtxAsyncEndpoint = "https://api.ltx.video/v2/text-to-video";
+const defaultLocalComfyBaseUrl = "http://127.0.0.1:8188";
+const defaultLocalComfyWorkflowPath = "workflows/svd-image-to-video.json";
 const validAspectRatios = new Set<WizardState["aspectRatio"]>(["9:16", "16:9", "1:1"]);
-const ltxDurations = [6, 8, 10, 12, 14, 16, 18, 20];
 
 function hasRecordKey<T extends Record<string, unknown>>(
   record: T,
@@ -378,7 +379,7 @@ function getProviderFromEnv(): VideoProvider {
   if (
     configuredProvider === "mock" ||
     configuredProvider === "nvidia" ||
-    configuredProvider === "ltx"
+    configuredProvider === "local-comfy"
   ) {
     return configuredProvider;
   }
@@ -603,195 +604,73 @@ async function generateWithNvidia(state: WizardState, prompt: string): Promise<G
   };
 }
 
-function getLtxResolution(aspectRatio: WizardState["aspectRatio"]) {
-  if (aspectRatio === "9:16") {
-    return "1080x1920";
-  }
-
-  return "1920x1080";
-}
-
-function getLtxMode() {
-  return process.env.LTX_MODE === "sync" ? "sync" : "async";
-}
-
-function getLtxEndpoint(mode: "sync" | "async") {
-  if (mode === "sync") {
-    return defaultLtxSyncEndpoint;
-  }
-
-  return process.env.LTX_ENDPOINT ?? defaultLtxAsyncEndpoint;
-}
-
-function getLtxDuration(stateDuration: number) {
-  const configuredDuration = Number(process.env.LTX_DURATION_SECONDS ?? stateDuration);
-  const requestedDuration = Number.isFinite(configuredDuration) ? configuredDuration : 6;
-
-  return ltxDurations.find((duration) => duration >= requestedDuration) ?? 20;
-}
-
-function buildLtxPayload(state: WizardState, prompt: string): ProviderPayload {
-  return {
-    prompt,
-    model: process.env.LTX_MODEL ?? "ltx-2-3-fast",
-    duration: getLtxDuration(state.duration),
-    resolution: getLtxResolution(state.aspectRatio),
-  };
-}
-
-function getPollInterval() {
-  const configuredInterval = Number(process.env.LTX_POLL_INTERVAL_MS ?? 5000);
-  return Number.isFinite(configuredInterval)
-    ? Math.min(Math.max(configuredInterval, 1000), 10000)
-    : 5000;
-}
-
-function getMaxPollAttempts() {
-  const configuredAttempts = Number(process.env.LTX_MAX_POLL_ATTEMPTS ?? 18);
-  return Number.isFinite(configuredAttempts)
-    ? Math.min(Math.max(configuredAttempts, 1), 60)
-    : 18;
-}
-
 function wait(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function pollLtxJob(apiKey: string, endpoint: string, jobId: string) {
-  const pollInterval = getPollInterval();
-  const maxAttempts = getMaxPollAttempts();
-  const statusEndpoint = `${endpoint.replace(/\/$/, "")}/${encodeURIComponent(jobId)}`;
-
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    if (attempt > 0) {
-      await wait(pollInterval);
-    }
-
-    const response = await fetch(statusEndpoint, {
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        Accept: "application/json",
-      },
-    });
-
-    const payload = await response.json().catch(() => null);
-
-    if (!response.ok) {
-      throw new Error(
-        `LTX job polling failed (${response.status}): ${errorDetails(
-          payload ?? response.statusText,
-        )}`,
-      );
-    }
-
-    if (!payload || typeof payload !== "object") {
-      continue;
-    }
-
-    const record = payload as Record<string, unknown>;
-    const status = getString(record, ["status"]);
-
-    if (status === "completed") {
-      return payload;
-    }
-
-    if (status === "failed") {
-      throw new Error(`LTX job failed: ${errorDetails(record.error ?? payload)}`);
-    }
-  }
-
-  throw new Error("LTX generation timed out before the job completed.");
+function getLocalComfyBaseUrl() {
+  return (process.env.LOCAL_COMFY_BASE_URL ?? defaultLocalComfyBaseUrl).replace(/\/$/, "");
 }
 
-async function generateWithLtx(state: WizardState, prompt: string): Promise<GenerationResult> {
-  const apiKey = process.env.LTX_API_KEY;
-  const mode = getLtxMode();
-  const endpoint = getLtxEndpoint(mode);
+function getLocalComfyWorkflowFileName() {
+  return basename(process.env.LOCAL_COMFY_WORKFLOW_PATH ?? defaultLocalComfyWorkflowPath);
+}
 
-  if (!apiKey) {
-    throw new Error("LTX_API_KEY is not configured on the server.");
+async function assertLocalComfyReady(baseUrl: string) {
+  try {
+    const response = await fetch(`${baseUrl}/system_stats`, {
+      method: "GET",
+      signal: AbortSignal.timeout(3000),
+    });
+
+    if (!response.ok) {
+      throw new Error(`ComfyUI health check returned ${response.status}.`);
+    }
+  } catch {
+    throw new Error("Local ComfyUI is not running. Start ComfyUI on port 8188 and try again.");
   }
+}
 
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      Accept: "application/json, video/mp4",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(buildLtxPayload(state, prompt)),
-  });
+async function loadLocalComfyWorkflow() {
+  const workflowPath = join(process.cwd(), "workflows", getLocalComfyWorkflowFileName());
 
-  const contentType = response.headers.get("content-type") ?? "";
+  try {
+    const workflow = await readFile(workflowPath, "utf8");
+    return JSON.parse(workflow) as ProviderPayload;
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      throw new Error("Local ComfyUI workflow JSON is invalid.");
+    }
 
-  if (response.ok && contentType.includes("video/")) {
-    const videoBytes = await response.arrayBuffer();
-    const base64 = Buffer.from(videoBytes).toString("base64");
-
-    return {
-      id: crypto.randomUUID(),
-      prompt,
-      videoUrl: `data:${contentType.split(";")[0]};base64,${base64}`,
-      base64,
-      mimeType: contentType.split(";")[0],
-      createdAt: new Date().toISOString(),
-      provider: "ltx",
-    };
+    return undefined;
   }
+}
 
-  const payload = await response.json().catch(() => null);
+async function generateWithLocalComfy(
+  state: WizardState,
+  prompt: string,
+): Promise<GenerationResult> {
+  void state;
+  void prompt;
 
-  if (!response.ok) {
+  const baseUrl = getLocalComfyBaseUrl();
+
+  await assertLocalComfyReady(baseUrl);
+
+  const workflow = await loadLocalComfyWorkflow();
+
+  if (!workflow) {
     throw new Error(
-      `LTX ${mode} generation failed (${response.status}): ${errorDetails(
-        payload ?? response.statusText,
-      )}`,
+      "Local ComfyUI workflow is not configured yet. Add a workflow JSON file under workflows/ and try again.",
     );
   }
 
-  const immediateVideo = extractVideoAsset(payload);
-  if (immediateVideo) {
-    return {
-      id: crypto.randomUUID(),
-      prompt,
-      videoUrl: immediateVideo.videoUrl,
-      url: immediateVideo.url,
-      base64: immediateVideo.base64,
-      mimeType: immediateVideo.mimeType,
-      createdAt: new Date().toISOString(),
-      provider: "ltx",
-    };
-  }
-
-  if (!payload || typeof payload !== "object") {
-    throw new Error(`LTX ${mode} generation response was empty.`);
-  }
-
-  const jobId = getString(payload as Record<string, unknown>, ["id", "job_id", "jobId"]);
-
-  if (!jobId) {
-    throw new Error(`LTX ${mode} generation did not return a job id: ${errorDetails(payload)}`);
-  }
-
-  const completedPayload = await pollLtxJob(apiKey, endpoint, jobId);
-  const videoAsset = extractVideoAsset(completedPayload);
-
-  if (!videoAsset) {
-    throw new Error(
-      `LTX completed job did not include a video asset: ${errorDetails(completedPayload)}`,
-    );
-  }
-
-  return {
-    id: crypto.randomUUID(),
-    prompt,
-    videoUrl: videoAsset.videoUrl,
-    url: videoAsset.url,
-    base64: videoAsset.base64,
-    mimeType: videoAsset.mimeType,
-    createdAt: new Date().toISOString(),
-    provider: "ltx",
-  };
+  // TODO: inject the FrameForge prompt into an SVD, LTX-Video local model, or AnimateDiff
+  // ComfyUI workflow JSON, POST it to /prompt, poll /history, and map the generated file
+  // into a browser-playable /view URL for the theater/download flow.
+  throw new Error(
+    "Local ComfyUI workflow execution is not wired yet. Add the workflow node mapping before running local AI generation.",
+  );
 }
 
 export async function POST(request: Request) {
@@ -811,9 +690,10 @@ export async function POST(request: Request) {
   }
 
   try {
-    const result = provider === "ltx"
-      ? await generateWithLtx(body, prompt)
-      : await generateWithNvidia(body, prompt);
+    const result =
+      provider === "local-comfy"
+        ? await generateWithLocalComfy(body, prompt)
+        : await generateWithNvidia(body, prompt);
 
     return NextResponse.json(result);
   } catch (error) {
